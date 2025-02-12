@@ -6,91 +6,149 @@ t2medium 2vcpu 4GiB Memory
 ![image](https://github.com/user-attachments/assets/4d921163-3019-4c20-9ad3-ab5280397543)
 ![image](https://github.com/user-attachments/assets/cc2b3b73-2cb4-48a0-ae5b-a4d9eaecd0c1)
 
-# Configure Kubernetes Cluster With Kubeadm on Ubuntu
+# Kubernetes Setup and Nginx Deployment
 
-## 1. Take 3 Ubuntu servers (I'Ve taken AWS Ubuntu 3 servers)
-```
-  One node for master and other two workers
+## Prerequisites
+Ensure your system is up to date:
+```sh
+sudo apt-get update
+sudo apt-get upgrade -y
 ```
 
-## 2. Repeat these steps on all three nodes
+## Disable Swap
+```sh
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+```
 
-  * ### Install Docker on all nodes
-  ```
-      sudo apt update
-      sudo apt install -y docker.io
-      sudo systemctl start docker
-      sudo systemctl enable docker
-  ```
-  
-  * ### Adding current user to docker group (Optional)
-      ```
-        sudo usermod -aG docker $USER
-        newgrp docker
-      ```
-  * ### Disable swap memory
-  
-      ```
-        sudo swapoff -a
-      
-      ```
-    
-  * ### Command to update fstab so that swap remains disabled after a reboot
-  
-      ```
-        sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-      ```
-    
-  * ### Disable AppArmor and set SELinux in permissive mode (if applicable)
-  ```
-        sudo systemctl stop apparmor
-        sudo systemctl disable apparmor
-  ```
-  
-  * ### Install kubeadm, kubectl, kubelet on all three nodes
-      
+## Configure Kernel Parameters
+Load necessary modules:
+```sh
+sudo tee /etc/modules-load.d/containerd.conf <<EOF
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
 ```
-sudo apt install -y apt-transport-https ca-certificates curl
-   curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo tee /etc/apt/keyrings/kubernetes-apt-keyring.asc > /dev/null
-    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+Enable networking settings:
+```sh
+sudo tee /etc/sysctl.d/kubernetes.conf <<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+sudo sysctl --system
 ```
-```
+
+## Install Containerd Runtime
+```sh
+sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmour -o /etc/apt/trusted.gpg.d/docker.gpg
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
 sudo apt update
-sudo apt install -y kubelet kubeadm kubectl
-sudo systemctl enable --now kubelet
-```     
-## 3. Initialize Kubernetes cluster on Master node (Run this only on master)
-    ```
-    sudo kubeadm init
-    ```
-        
-## 4. Do the following setup to start using Kubernetes cluster (Run this only on master)
-  ```
-    mkdir -p $HOME/.kube
-    sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-    sudo chown $(id -u):$(id -g) $HOME/.kube/config
-  ```
-## 5. Add pod network add-ons (Run this only on master)
-  
-    ```
-    kubectl apply -f https://github.com/weaveworks/weave/releases/latest/download/weave-daemonset-k8s.yaml
-    
-    ```
-        
-  ## 6. Take note of kubeadm command and run on all workers
-  
-  ```
-    Run this command (replace with your actual command) on every worker node to join the cluster:
-  
-    sudo kubeadm join <master-ip>:6443 --token <token> \
-      --discovery-token-ca-cert-hash sha256:<hash>
-  ```
+sudo apt install -y containerd.io
 
-  ## 7. Get list of nodes in the cluster (Run this on master)
-  
-  ```
-  kubectl get nodes
-  ```
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+```
+
+## Install Kubernetes Components
+```sh
+sudo apt-get update
+sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+```
+
+### Install Kubelet, Kubeadm, and Kubectl
+```sh
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+```
+
+## Initialize Kubernetes Master Node
+```sh
+sudo kubeadm init
+```
+
+Set global Kubeconfig variable:
+```sh
+export KUBECONFIG=/etc/kubernetes/admin.conf
+```
+
+Set up the cluster:
+```sh
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+## Join Worker Nodes
+Generate a token and join command:
+```sh
+kubeadm token create --print-join-command
+```
+Run the generated command on the worker node with `sudo`.
+
+## Configure Networking (Calico) Saved in seperate file in this repo
+Create `calico.yaml` and apply it:
+```sh
+sudo chmod 764 /etc/kubernetes/admin.conf
+kubectl apply -f calico.yaml
+```
+
+---
+
+# Nginx Deployment with Custom HTML Page
+
+Deploy Nginx:
+```sh
+
+kubectl create deployment nginx --image=nginx:latest --port=80
+kubectl expose deployment nginx --type=NodePort --port=80
+kubectl get svc
+```
+
+Access Nginx Port may vary:
+```sh
+curl -o http://publicipof workernode:<pod port>
+curl -o http://54.171.60.51:30355
+curl http://54.171.60.51:30355
+```
+
+Manage Nginx pods:
+```sh
+kubectl get pods
+kubectl exec -it nginx-7c79c4bf97-zjd7v -- /bin/sh
+```
+
+Modify the index page:
+```sh
+vi index.html
+```
+
+Copy the modified page to the pod:
+```sh
+kubectl cp index.html nginx-7c79c4bf97-zjd7v:/usr/share/nginx/html/
+```
+
+Verify the changes:
+```sh
+curl http://54.171.60.51:30355
+```
+
+
 
 
 
